@@ -24,71 +24,81 @@ def create_split_indeces(data):
     test_split = []
     for i_split, (trainval_list, test_list) in enumerate(kf.split(X)):
             
-            train_split.append(trainval_list[int(len(trainval_list)*0.1):])
-            val_split.append(trainval_list[0:int(len(trainval_list)*0.1)])
-            test_split.append(test_list)
+        train_split.append(trainval_list[int(len(trainval_list)*0.1):])
+        val_split.append(trainval_list[0:int(len(trainval_list)*0.1)])
+        test_split.append(test_list)
 
     return train_split, val_split, test_split
 
-
-
-class load_id_for_train(Dataset):
+class load_4Ddata(Dataset):
     def __init__(self, 
-                data_all,
+                df_data_all,
                 split_ind,
-                ):   
-        self.data_id = np.array(data_all["SUB_ID"])[split_ind]
-        self.label = np.array(data_all["DX_GROUP"])[split_ind].reshape(-1,1)
-        
-    def __len__(self):
-        return len(self.label)
-    
-    def __getitem__(self, item):
-        return torch.tensor(self.data_id[item]), torch.tensor(self.label[item], dtype = float)
-
-class load_4Ddata_for_validation(Dataset):
-    def __init__(self, 
                 n_timepoints,
-                data_all,
-                split_ind,
                 mask_data
                 ):   
-        print('Taking my time to load 4D validation data....')
+        self.label = np.array(df_data_all["DX_GROUP"])[split_ind].reshape(-1,1)
+        self.mask = mask_data
+        self.n_timepoints = n_timepoints
+        
+        # create the path to each sbj data
         fullpath_str = "/data_local/deeplearning/ABIDE_LC/raw/00" 
-        data_id = np.array(data_all["SUB_ID"])[split_ind]
-        self.label = np.array(data_all["DX_GROUP"])[split_ind].reshape(-1,1)
-
-        data_path=[]
+        data_id = np.array(df_data_all["SUB_ID"])[split_ind]
+        self.data_path=[]
         for i in data_id:
-            data_path.append(fullpath_str 
-            #+ str(data_id.values[split_indeces[i],0]) 
+            self.data_path.append(fullpath_str 
             + str(i)
             + "/preproc.feat/"
-            #+ "00" + str(data_id.values[split_indeces[i],0]) 
+
             + "00" + str(i) 
             + "_filtered_func_data_MNI4mm.nii.gz")    
 
-        self.data=np.empty((len(data_id), 45*54*45, n_timepoints))
-
-        for i,sbj_path in enumerate(data_path):  
-                   
-            sbj_data = nib.load(sbj_path)
-            sbj_data = sbj_data.get_fdata()[:,:,:,0:n_timepoints]
-            sbj_data = sbj_data.reshape(-1,n_timepoints)
-            self.data[i,:,:]=sbj_data
-        print('4D validation data: loaded')
-
-
-        if mask_data == True:
-            mask = np.load("brain_mask", allow_pickle= True)
-            self.data = self.data[:, mask.reshape(-1), :]
-
     def __len__(self):
         return len(self.label)
     
     def __getitem__(self, item):
-        return torch.tensor(self.data[item], dtype= torch.float32), torch.tensor(self.label[item], dtype= torch.float32)
 
+        sbj_path = self.data_path[item]
+        self.data = nib.load(sbj_path)
+        self.data = self.data.get_fdata()[:,:,:,0:self.n_timepoints]
+        self.data = self.data.reshape(-1,self.n_timepoints)
+
+        if self.mask == True:
+            mask = np.load("brain_mask", allow_pickle= True)
+            self.data = self.data[mask.reshape(-1), :]
+
+        return torch.tensor(self.data, dtype= torch.float32), torch.tensor(self.label[item], dtype= torch.float32)
+
+class load_tc_data(Dataset):
+    def __init__(self, 
+                df_data_all,
+                split_ind,
+                n_timepoints, paths, mask_data
+                ):   
+        self.data_id = np.array(df_data_all["SUB_ID"])[split_ind]
+        self.label = np.array(df_data_all["DX_GROUP"])[split_ind].reshape(-1,1)
+        self.n_timepoints
+        self.paths
+        self.mask_data
+    def __len__(self):
+        return len(self.label)
+    
+    def __getitem__(self, item, ica_ind):
+        sbj_tc_path= self.paths[0] + str((self.data_id[item])).zfill(7) + '_melodic_run' + ica_ind + '_dr1'
+        data =np.loadtxt(sbj_tc_path)       
+        data=np.transpose(data[0:self.n_timepoints,:]).reshape(1,-1, self.n_timepoints)  
+        return torch.tensor(data), torch.tensor(self.label[item], dtype = float)
+
+def load_ica_matrix(paths, ica_ind, mask_data):
+    
+    ica_filename = paths[1] + "melodic_run"+ ica_ind + "/melodic_IC.nii.gz"
+    ica_matrix = nib.load(ica_filename)
+    ica_matrix = ica_matrix.get_fdata().reshape(-1,25).transpose()
+
+    if mask_data==True:
+        mask=np.load("brain_mask", allow_pickle= True)
+        ica_matrix = ica_matrix[:, mask.reshape(-1)]
+    return torch.as_tensor(ica_matrix, dtype= torch.float32)
 
 def load_batch(ids, n_timepoints, paths, ica_ind, mask_data):
         # randomly select ica id
@@ -115,7 +125,8 @@ def load_batch(ids, n_timepoints, paths, ica_ind, mask_data):
 
 def update_orig_weight(self, ica_matrix, lr): 
     p = list(self.parameters())
-    grad = self.ICAGrouping.icaconv_red.weight.data.clone()
+    #grad = self.ICAGrouping.icaconv_red.weight.data.clone()
+    grad = self.ICAGrouping.icaconv_red.weight.grad.data.clone()
     for i,wred_grad in enumerate(grad):
         #p[0].data[i,:,:]=(torch.matmul(wred_grad.transpose_(1,0), ica_matrix)).transpose_(1,0)*lr
         p[0].data[i,:,:]+=(torch.matmul(wred_grad.transpose_(1,0), ica_matrix)).transpose_(1,0)*(-lr)
